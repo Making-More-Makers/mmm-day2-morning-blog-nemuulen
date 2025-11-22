@@ -1,0 +1,453 @@
+# GitHub Classroom Autograding for Day 2 Blog Assignment
+# Day 2 博客作业的 GitHub Classroom 自动评分
+
+name: AI Auto-Grading for Blog
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  ai-grading:
+    name: AI Blog Grading
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout student repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install requests Pillow PyYAML
+      
+      - name: Check submission files
+        id: check_files
+        run: |
+          echo "Checking for submission files..."
+          
+          # Check for submission.json (required)
+          if [ ! -f "submission.json" ]; then
+            echo "❌ Error: submission.json not found"
+            echo "Please create submission.json with your GitHub Pages URL and screenshot filename"
+            exit 1
+          fi
+          
+          # Check for screenshot
+          if [ -f "blog-screenshot.png" ]; then
+            echo "screenshot_file=blog-screenshot.png" >> $GITHUB_OUTPUT
+            echo "✅ Found screenshot: blog-screenshot.png"
+          elif [ -f "blog-screenshot.jpg" ]; then
+            echo "screenshot_file=blog-screenshot.jpg" >> $GITHUB_OUTPUT
+            echo "✅ Found screenshot: blog-screenshot.jpg"
+          else
+            echo "❌ Error: No screenshot file found (blog-screenshot.png or blog-screenshot.jpg)"
+            exit 1
+          fi
+          
+          echo "✅ Required files found"
+      
+      - name: Run AI grading
+        env:
+          AI_PROVIDER: ${{ secrets.AI_PROVIDER || 'zhipu' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SCREENSHOT_FILE: ${{ steps.check_files.outputs.screenshot_file }}
+        run: |
+          # Create grading script inline
+          cat > grade.py << 'PYTHON_SCRIPT'
+          import os
+          import json
+          import requests
+          from pathlib import Path
+          from PIL import Image
+          import re
+          from urllib.parse import urlparse
+          
+          # Configuration
+          AI_PROVIDER = os.environ.get("AI_PROVIDER", "zhipu")
+          SCREENSHOT_FILE = os.environ.get("SCREENSHOT_FILE", "blog-screenshot.png")
+          
+          if AI_PROVIDER == "zhipu" and os.environ.get("ZHIPU_API_KEY"):
+              ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY")
+              MODEL = "glm-4-flash"
+              print(f"🤖 Using 智谱AI {MODEL}")
+          elif os.environ.get("OPENAI_API_KEY"):
+              OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+              MODEL = "gpt-4o-mini"
+              print(f"🤖 Using OpenAI {MODEL}")
+          else:
+              print("❌ Error: No AI API key found")
+              exit(1)
+          
+          print("=" * 60)
+          print("🎓 Day 2 Blog Assignment - AI Auto-Grading")
+          print("=" * 60)
+          
+          # Read submission.json
+          try:
+              with open("submission.json", "r", encoding="utf-8") as f:
+                  submission = json.load(f)
+              
+              github_pages_url = submission.get("github_pages_url", "")
+              screenshot_filename = submission.get("screenshot_filename", SCREENSHOT_FILE)
+              student_notes = submission.get("notes", "")
+              
+              print(f"📄 Submission loaded:")
+              print(f"   - URL: {github_pages_url}")
+              print(f"   - Screenshot: {screenshot_filename}")
+              
+          except Exception as e:
+              print(f"❌ Error reading submission.json: {str(e)}")
+              exit(1)
+          
+          # Validate URL format
+          def validate_github_pages_url(url):
+              """Check if URL is a valid GitHub Pages URL"""
+              if not url:
+                  return False, "URL is empty"
+              
+              if url.startswith("http://localhost") or url.startswith("localhost"):
+                  return False, "URL is localhost (must be GitHub Pages URL)"
+              
+              if "github.io" not in url:
+                  return False, "URL does not contain 'github.io' (must be GitHub Pages)"
+              
+              if not url.startswith("https://"):
+                  return False, "URL must start with 'https://'"
+              
+              return True, "Valid GitHub Pages URL format"
+          
+          url_valid, url_message = validate_github_pages_url(github_pages_url)
+          print(f"🔍 URL validation: {url_message}")
+          
+          # Check URL accessibility
+          url_accessible = False
+          status_code = None
+          
+          if url_valid:
+              try:
+                  print(f"🌐 Checking if URL is accessible...")
+                  response = requests.get(github_pages_url, timeout=10, allow_redirects=True)
+                  status_code = response.status_code
+                  url_accessible = (status_code == 200)
+                  
+                  if url_accessible:
+                      print(f"✅ URL is accessible (HTTP {status_code})")
+                  else:
+                      print(f"⚠️ URL returned HTTP {status_code}")
+              except Exception as e:
+                  print(f"❌ Cannot access URL: {str(e)}")
+          
+          # Check screenshot
+          screenshot_valid = False
+          screenshot_info = {}
+          
+          if Path(screenshot_filename).exists():
+              try:
+                  img = Image.open(screenshot_filename)
+                  width, height = img.size
+                  screenshot_info = {
+                      "width": width,
+                      "height": height,
+                      "format": img.format,
+                      "size_kb": Path(screenshot_filename).stat().st_size / 1024
+                  }
+                  screenshot_valid = True
+                  print(f"✅ Screenshot found: {width}x{height} {img.format}, {screenshot_info['size_kb']:.1f} KB")
+                  
+                  if screenshot_info['size_kb'] > 5120:  # 5 MB
+                      print(f"⚠️ Warning: Screenshot is large (>{screenshot_info['size_kb']:.1f} KB)")
+                  
+              except Exception as e:
+                  print(f"❌ Error reading screenshot: {str(e)}")
+          else:
+              print(f"❌ Screenshot not found: {screenshot_filename}")
+          
+          # Prepare data for AI
+          grading_data = {
+              "url": github_pages_url,
+              "url_valid": url_valid,
+              "url_accessible": url_accessible,
+              "status_code": status_code,
+              "screenshot_valid": screenshot_valid,
+              "screenshot_info": screenshot_info,
+              "student_notes": student_notes
+          }
+          
+          # AI Grading Prompt
+          prompt = f"""You are a Maker educator grading Day 2 Blog assignment.
+
+          This assignment requires students to:
+          1. Build a Docusaurus blog
+          2. Deploy it to GitHub Pages
+          3. Submit the GitHub Pages URL
+          4. Submit a screenshot showing the deployed site
+
+          Here is the student's submission data:
+          {json.dumps(grading_data, indent=2)}
+
+          Please provide grading feedback in BOTH English and Chinese covering:
+
+          ## Technical Checks | 技术检查
+          1. ✅/❌ URL Format - Is it a valid GitHub Pages URL?
+          2. ✅/❌ URL Accessibility - Is the site live and accessible?
+          3. ✅/❌ Screenshot Submission - Did they submit a valid screenshot?
+
+          ## Grading Breakdown | 评分细分
+          Based on the rubric:
+          - Deployment & Accessibility (20 pts): {url_accessible and url_valid}
+          - Screenshot Submission (10 pts): {screenshot_valid}
+
+          Provide estimated points for these sections.
+
+          ## Feedback | 反馈
+          - What they did well (be specific)
+          - What needs improvement (if any)
+          - Specific action items if changes are needed
+
+          ## Overall Status | 总体状态
+          - ✅ Complete and Deployed - Blog is live!
+          - ⚠️ Needs Attention - URL or screenshot issues
+          - ❌ Not Submitted - Missing requirements
+
+          Be encouraging! This is a big achievement for Day 2.
+
+          Output format: Markdown with clear sections in English and Chinese.
+          """
+          
+          # Call AI API
+          try:
+              if AI_PROVIDER == "zhipu":
+                  url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+                  headers = {
+                      "Content-Type": "application/json",
+                      "Authorization": f"Bearer {ZHIPU_API_KEY}"
+                  }
+                  payload = {
+                      "model": MODEL,
+                      "messages": [
+                          {"role": "system", "content": "You are a warm, encouraging Maker educator. Provide bilingual feedback in English and Chinese. 你是一位温暖、鼓励学生的创客教育者。提供中英双语反馈。"},
+                          {"role": "user", "content": prompt}
+                      ],
+                      "temperature": 0.7,
+                      "max_tokens": 2000
+                  }
+                  response = requests.post(url, headers=headers, json=payload, timeout=120)
+                  response.raise_for_status()
+                  feedback = response.json()["choices"][0]["message"]["content"]
+              
+              else:  # OpenAI
+                  headers = {
+                      "Content-Type": "application/json",
+                      "Authorization": f"Bearer {OPENAI_API_KEY}"
+                  }
+                  payload = {
+                      "model": MODEL,
+                      "messages": [
+                          {"role": "system", "content": "You are a warm, encouraging Maker educator. Provide bilingual feedback in English and Chinese."},
+                          {"role": "user", "content": prompt}
+                      ],
+                      "temperature": 0.7,
+                      "max_tokens": 2000
+                  }
+                  response = requests.post("https://api.openai.com/v1/chat/completions", 
+                                         headers=headers, json=payload, timeout=120)
+                  response.raise_for_status()
+                  feedback = response.json()["choices"][0]["message"]["content"]
+              
+              print("✅ AI grading completed")
+              
+              # Create full feedback
+              full_feedback = f"""# 📝 AI Grading Feedback | AI评分反馈
+
+          > **Assignment**: Day 2 Morning - Technical Blog  
+          > **作业**: 第2天上午 - 技术博客  
+          > **Graded by**: AI Teaching Assistant ({MODEL})  
+          > **评分者**: AI助教 ({MODEL})  
+          > **Provider**: {AI_PROVIDER.upper()}
+
+          ---
+
+          ## 📊 Submission Summary | 提交摘要
+
+          **GitHub Pages URL | GitHub Pages 网址:**  
+          `{github_pages_url}`
+
+          **Screenshot | 截图:**  
+          `{screenshot_filename}` {'✅' if screenshot_valid else '❌'}
+
+          **Technical Status | 技术状态:**
+          - URL Format Valid: {'✅' if url_valid else '❌'} {url_message}
+          - URL Accessible: {'✅' if url_accessible else '❌'} {f'(HTTP {status_code})' if status_code else '(Not checked)'}
+          - Screenshot Submitted: {'✅' if screenshot_valid else '❌'}
+
+          ---
+
+          {feedback}
+
+          ---
+
+          ## 📌 Next Steps | 下一步
+
+          {'✅ **Congratulations!** Your blog is live and accessible. Great work on Day 2!' if url_accessible and screenshot_valid else ''}
+          {'✅ **恭喜！**你的博客已上线且可访问。第2天干得好！' if url_accessible and screenshot_valid else ''}
+
+          {'⚠️ **Action Required:** Please fix the issues mentioned above and push your changes.' if not (url_accessible and screenshot_valid) else ''}
+          {'⚠️ **需要行动：**请修复上述问题并推送更改。' if not (url_accessible and screenshot_valid) else ''}
+
+          ---
+
+          ## 📚 Resources | 资源
+
+          - [Troubleshooting Guide](./README.md#troubleshooting) - Common issues and solutions
+          - [Submission Instructions](./SUBMISSION.md) - How to submit correctly
+          - [Grading Rubric](./rubric.md) - Detailed grading criteria
+
+          ---
+
+          ## 💬 Questions? | 有疑问？
+
+          If you have questions about this feedback:
+          1. Check the README.md troubleshooting section
+          2. Review SUBMISSION.md for requirements
+          3. Contact your instructor for help
+
+          如果对反馈有疑问：
+          1. 查看 README.md 故障排除部分
+          2. 查看 SUBMISSION.md 了解要求
+          3. 联系讲师寻求帮助
+
+          ---
+
+          *This is automated AI grading. Your instructor will manually verify blog content quality.*  
+          *这是 AI 自动评分。讲师将手动验证博客内容质量。*
+          """
+              
+              # Save feedback
+              with open("feedback.md", "w", encoding="utf-8") as f:
+                  f.write(full_feedback)
+              
+              print("💾 Feedback saved to feedback.md")
+              
+              # Save grading result as JSON
+              grading_result = {
+                  "timestamp": os.popen('date +"%Y-%m-%d %H:%M:%S"').read().strip(),
+                  "provider": AI_PROVIDER,
+                  "model": MODEL,
+                  "checks": grading_data,
+                  "passed": url_accessible and url_valid and screenshot_valid
+              }
+              
+              with open("grading-result.json", "w", encoding="utf-8") as f:
+                  json.dump(grading_result, f, indent=2, ensure_ascii=False)
+              
+              print("✨ Grading complete!")
+              print("=" * 60)
+              
+          except Exception as e:
+              print(f"❌ AI grading error: {str(e)}")
+              
+              error_feedback = f"""# ❌ AI Grading Error | AI评分错误
+
+          An error occurred during AI grading:
+
+          评分过程中发生错误：
+
+          ```
+          {str(e)}
+          ```
+
+          **Provider**: {AI_PROVIDER.upper()}  
+          **Model**: {MODEL}
+
+          ## Submission Data | 提交数据
+
+          - **URL**: `{github_pages_url if 'github_pages_url' in locals() else 'Not loaded'}`
+          - **Screenshot**: `{screenshot_filename if 'screenshot_filename' in locals() else 'Not loaded'}`
+
+          ## Manual Check Required | 需要手动检查
+
+          Please contact your instructor for manual grading.
+
+          请联系讲师进行手动评分。
+
+          **Possible reasons | 可能的原因:**
+          - API key not configured | API密钥未配置
+          - Network connectivity issue | 网络连接问题
+          - API rate limit exceeded | API速率限制
+          """
+              
+              with open("feedback.md", "w", encoding="utf-8") as f:
+                  f.write(error_feedback)
+              
+              raise
+          
+          PYTHON_SCRIPT
+          
+          python grade.py
+      
+      - name: Post feedback as issue
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            // Read feedback
+            let feedback;
+            try {
+              feedback = fs.readFileSync('feedback.md', 'utf8');
+            } catch (error) {
+              feedback = `# ❌ Grading Failed\n\nCould not generate feedback. Please contact your instructor.\n\n评分失败。请联系讲师。\n\nError: ${error.message}`;
+            }
+            
+            // Check if feedback issue already exists
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['ai-grading', 'feedback']
+            });
+            
+            if (issues.data.length > 0) {
+              // Update existing issue
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues.data[0].number,
+                body: feedback
+              });
+              console.log(`✅ Updated feedback issue #${issues.data[0].number}`);
+            } else {
+              // Create new issue
+              const issue = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: '📝 AI Grading Feedback | AI评分反馈',
+                body: feedback,
+                labels: ['ai-grading', 'feedback']
+              });
+              console.log(`✅ Created feedback issue #${issue.data.number}`);
+            }
+      
+      - name: Upload grading artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grading-results
+          path: |
+            feedback.md
+            grading-result.json
+
